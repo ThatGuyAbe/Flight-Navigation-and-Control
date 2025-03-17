@@ -1,51 +1,56 @@
 import time
+import math
 import board
 import busio
-import math
-from adafruit_bno08x import BNO08X_I2C
+from adafruit_bno08x.i2c import BNO08X_I2C
+from adafruit_bno08x import BNO_REPORT_ROTATION_VECTOR
 
-# Initialize I2C bus and sensor
+# Initialize I2C
 i2c = busio.I2C(board.SCL, board.SDA)
-sensor = BNO08X_I2C(i2c)
 
-def quaternion_to_euler(w, x, y, z):
-    """
-    Convert a quaternion into Euler angles (roll, pitch, yaw)
-    Roll is rotation around the x-axis, pitch is rotation around the y-axis, and yaw is rotation around the z-axis.
-    Returns angles in radians.
-    """
-    # Roll (x-axis rotation)
-    sinr_cosp = 2 * (w * x + y * z)
-    cosr_cosp = 1 - 2 * (x * x + y * y)
-    roll = math.atan2(sinr_cosp, cosr_cosp)
+# Initialize BNO085
+bno = BNO08X_I2C(i2c)
 
-    # Pitch (y-axis rotation)
-    sinp = 2 * (w * y - z * x)
-    # Use 90 degrees if out of range
-    if abs(sinp) >= 1:
-        pitch = math.copysign(math.pi / 2, sinp)
-    else:
+# Enable rotation vector feature
+bno.enable_feature(BNO_REPORT_ROTATION_VECTOR)
+time.sleep(0.5)  # Allow sensor to initialize
+
+def get_yaw_pitch_roll():
+    try:
+        quat = bno.quaternion
+
+        # **Fix: Check if quaternion data is valid before using it**
+        if quat is None or len(quat) < 4:
+            print("Warning: Quaternion data is incomplete or unavailable")
+            return None, None, None  # Return None to avoid an error
+
+        quat_i, quat_j, quat_k, quat_real = quat
+
+        # Compute yaw, pitch, roll
+        yaw = math.atan2(2.0 * (quat_real * quat_k + quat_i * quat_j),
+                         1.0 - 2.0 * (quat_j**2 + quat_k**2))
+
+        sinp = 2.0 * (quat_real * quat_j - quat_k * quat_i)
+        sinp = max(-1.0, min(1.0, sinp))  # **Clamp the value to prevent math domain errors**
         pitch = math.asin(sinp)
 
-    # Yaw (z-axis rotation)
-    siny_cosp = 2 * (w * z + x * y)
-    cosy_cosp = 1 - 2 * (y * y + z * z)
-    yaw = math.atan2(siny_cosp, cosy_cosp)
+        roll = math.atan2(2.0 * (quat_real * quat_i + quat_j * quat_k),
+                          1.0 - 2.0 * (quat_i**2 + quat_j**2))
 
-    return roll, pitch, yaw
+        return math.degrees(yaw), math.degrees(pitch), math.degrees(roll)
 
-while True:
-    # Retrieve quaternion from the sensor (format: (w, x, y, z))
-    quat = sensor.quaternion
-    if quat is not None:
-        w, x, y, z = quat
-        roll, pitch, yaw = quaternion_to_euler(w, x, y, z)
-        # Convert radians to degrees for easier interpretation
-        roll_deg = math.degrees(roll)
-        pitch_deg = math.degrees(pitch)
-        yaw_deg = math.degrees(yaw)
-        print("Roll: {:.2f}°, Pitch: {:.2f}°, Yaw: {:.2f}°".format(roll_deg, pitch_deg, yaw_deg))
-    else:
-        print("Quaternion data not available.")
-    
-    time.sleep(0.1)
+    except IndexError as e:
+        print(f"IndexError: {e} - Quaternion data might be incomplete")
+        return None, None, None  # Prevent the crash
+
+try:
+    while True:
+        yaw, pitch, roll = get_yaw_pitch_roll()
+        if yaw is not None:
+            print(f"Yaw: {yaw:.2f}°, Pitch: {pitch:.2f}°, Roll: {roll:.2f}°")
+        else:
+            print("Skipping this reading due to missing data")
+        time.sleep(0.1)
+except KeyboardInterrupt:
+    print("Exiting...")
+
