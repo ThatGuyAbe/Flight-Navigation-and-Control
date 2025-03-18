@@ -2,6 +2,10 @@ import time
 import RPi.GPIO as GPIO
 from VL53L1X import VL53L1X
 
+tb = 200
+im = 200
+rm = 1 # 1 = short, 2 = medium, 3 = long
+
 # Define XSHUT pins (BCM numbering)
 xshut_pins = [6, 5]  # Example: GPIO6 and GPIO5
 
@@ -10,8 +14,6 @@ GPIO.setmode(GPIO.BCM)
 for pin in xshut_pins:
     GPIO.setup(pin, GPIO.OUT)
     GPIO.output(pin, GPIO.LOW)
-
-time.sleep(0.5)  # Let sensors power down
 
 sensors = []
 
@@ -31,23 +33,14 @@ for i, pin in enumerate(xshut_pins):
         sensor = VL53L1X(i2c_bus=1, i2c_address=new_address)
         sensor.open()
 
+    sensor.set_timing(tb, im)
+    sensor.start_ranging(rm)
     sensors.append(sensor)
-
-# Verify I2C addresses
-import smbus
-bus = smbus.SMBus(1)
-print("I2C addresses found:", [hex(addr) for addr in bus.scan()])
-
-# Start ranging
-for sensor in sensors:
-    sensor.start_ranging(1)  # 1 = Short range
 
 try:
     while True:
         for i, sensor in enumerate(sensors):
-            if sensor.data_ready:
-                print(f"Sensor {i+1}: {sensor.get_distance()} mm")
-                sensor.clear_interrupt()
+            print(f"Sensor {i+1}: {sensor.get_distance()} mm")
         time.sleep(0.1)
 except KeyboardInterrupt:
     for sensor in sensors:
