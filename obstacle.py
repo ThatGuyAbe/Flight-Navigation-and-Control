@@ -3,68 +3,99 @@ import threading
 import RPi.GPIO as GPIO
 from VL53L1X import VL53L1X
 
-# Define XSHUT pins for multiple sensors (using BCM numbering)
-xshut_pins = [6, 5]  # Example GPIO pins connected to XSHUT
+# Configuration
+XSHUT_PINS = [6, 5]  # BCM GPIO pins
+TIMING_BUDGET = 20    # 20ms → 50Hz (minimum stable value)
+INTER_MEASUREMENT = 20  # Must be ≥ timing budget
+RANGE_MODE = 1        # 1 = Short range (fastest)
+I2C_BUS = 1           # Raspberry Pi I2C bus
+BASE_ADDRESS = 0x29   # Default VL53L1X address
 
-# Sensor configuration
-timing_budget = 200
-intermeasurement = 200
-ranging_mode = 1  # 1 = short, 2 = medium, 3 = long
+# Thread-safe resources
+i2c_lock = threading.Lock()
 
-# Setup GPIO
-GPIO.setmode(GPIO.BCM)
-for pin in xshut_pins:
-    GPIO.setup(pin, GPIO.OUT)
-    GPIO.output(pin, GPIO.LOW)  # Initially disable all sensors
+class SensorManager:
+    def __init__(self):
+        self.sensors = []
+        self.threads = []
+        self.running = True
+        self.distances = [0] * len(XSHUT_PINS)  # Shared distance data
+        self._init_hardware()
 
-# Shared list to hold sensor objects
-sensors = []
+    def _init_hardware(self):
+        """Single-threaded hardware initialization"""
+        GPIO.setmode(GPIO.BCM)
+        GPIO.setwarnings(False)
 
-# Function for reading distance from each sensor in a separate thread
-def read_sensor(sensor, sensor_id):
-    while True:
-        distance = sensor.get_distance()
-        print(f"Sensor {sensor_id}: {distance} mm")
-        time.sleep(0.1)  # Adjust polling rate for performance
+        # Power cycle all sensors
+        for pin in XSHUT_PINS:
+            GPIO.setup(pin, GPIO.OUT)
+            GPIO.output(pin, GPIO.LOW)
+        time.sleep(0.1)
 
-# Initialize each sensor
-threads = []
-for i, pin in enumerate(xshut_pins):
-    # Power on each sensor one at a time
-    GPIO.output(pin, GPIO.HIGH)
-    time.sleep(0.5)  # Give sensor time to initialize
+        # Initialize sensors sequentially
+        for idx, pin in enumerate(XSHUT_PINS):
+            GPIO.output(pin, GPIO.HIGH)
+            time.sleep(0.05)  # Reduced power-up delay
 
-    # Initialize sensor at default address
-    sensor = VL53L1X(i2c_bus=1, i2c_address=0x29)
-    sensor.open()
+            address = BASE_ADDRESS + idx
+            if idx > 0:
+                with i2c_lock:
+                    temp = VL53L1X(I2C_BUS, BASE_ADDRESS)
+                    temp.open()
+                    temp.set_i2c_address(address)
+                    temp.close()
+                    time.sleep(0.01)
 
-    # Change the I2C address if it's not the first sensor
-    if i != 0:
-        new_address = 0x29 + i
-        sensor.set_i2c_address(new_address)
-        # Reinitialize sensor with new address
-        sensor = VL53L1X(i2c_bus=1, i2c_address=new_address)
-        sensor.open()
+            with i2c_lock:
+                sensor = VL53L1X(I2C_BUS, address)
+                sensor.open()
+                sensor.set_timing(TIMING_BUDGET, INTER_MEASUREMENT)
+                sensor.set_range_mode(RANGE_MODE)
+                sensor.start_ranging(RANGE_MODE)
+                self.sensors.append(sensor)
 
-    # Set sensor parameters
-    sensor.set_timing(timing_budget, intermeasurement)
-    sensor.start_ranging(ranging_mode)
+    def _read_worker(self, sensor_id):
+        """Thread-safe sensor reading"""
+        sensor = self.sensors[sensor_id]
+        while self.running:
+            if sensor.data_ready:
+                with i2c_lock:
+                    self.distances[sensor_id] = sensor.get_distance()
+                    sensor.clear_interrupt()
+            time.sleep(0.001)  # Minimal sleep
 
-    # Add sensor to the list
-    sensors.append(sensor)
+    def start(self):
+        """Start measurement threads"""
+        for idx in range(len(self.sensors)):
+            thread = threading.Thread(
+                target=self._read_worker,
+                args=(idx,),
+                daemon=True
+            )
+            thread.start()
+            self.threads.append(thread)
 
-    # Start a new thread for each sensor
-    thread = threading.Thread(target=read_sensor, args=(sensor, i + 1), daemon=True)
-    threads.append(thread)
-    thread.start()
+    def stop(self):
+        """Clean shutdown"""
+        self.running = False
+        for sensor in self.sensors:
+            with i2c_lock:
+                sensor.stop_ranging()
+                sensor.close()
+        GPIO.cleanup()
 
-# Keep the main thread alive
-try:
-    while True:
-        time.sleep(1)
-except KeyboardInterrupt:
-    print("\nStopping threads and cleaning up GPIO...")
-    for sensor in sensors:
-        sensor.stop_ranging()
-    GPIO.cleanup()
+# Main execution
+if __name__ == "__main__":
+    manager = SensorManager()
+    manager.start()
 
+    try:
+        while True:
+            # Display latest readings
+            for idx, dist in enumerate(manager.distances):
+                print(f"Sensor {idx+1}: {dist:4} mm")
+            print("\033[F" * (len(manager.sensors) + 1))  # Clear previous output
+            time.sleep(0.02)  # 50Hz display update
+    except KeyboardInterrupt:
+        manager.stop()
