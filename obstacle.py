@@ -1,56 +1,55 @@
 import time
-import board
-import digitalio
-import adafruit_vl53l1x
+import RPi.GPIO as GPIO
+from VL53L1X import VL53L1X
 
-# Define the I2C pins.
-i2c = board.I2C()  # uses board.SCL and board.SDA
-# i2c = board.STEMMA_I2C()  # For using the built-in STEMMA QT connector on a microcontroller
+# Define XSHUT pins (BCM numbering)
+xshut_pins = [6, 5]  # Example: GPIO6 and GPIO5
 
-xshut = [
-    # Update the D6 and D5 pins to match the pins to which you wired your sensor XSHUT pins.
-    digitalio.DigitalInOut(board.D6),
-    digitalio.DigitalInOut(board.D5),
-    # Add more VL53L1X sensors by defining their XSHUT pins here.
-]
+# Setup GPIO
+GPIO.setmode(GPIO.BCM)
+for pin in xshut_pins:
+    GPIO.setup(pin, GPIO.OUT)
+    GPIO.output(pin, GPIO.LOW)
 
-for shutdown_pin in xshut:
-    # Set the shutdown pins to output, and pull them low.
-    shutdown_pin.switch_to_output(value=False)
-    # These pins are active when Low, meaning:
-    #   If the output signal is LOW, then the VL53L1X sensor is off.
-    #   If the output signal is HIGH, then the VL53L1X sensor is on.
-# All VL53L1X sensors are now off.
+time.sleep(0.5)  # Let sensors power down
 
-# Create a list to be used for the array of VL53L1X sensors.
-vl53l1x = []
+sensors = []
 
-# Change the address of the additional VL53L1X sensors.
-for pin_number, shutdown_pin in enumerate(xshut):
-    # Turn on the VL53L1X sensors to allow hardware check.
-    shutdown_pin.value = True
-    # Instantiate the VL53L1X I2C object and insert it into the vl53l1x list.
-    # This also performs VL53L1X hardware check.
-    sensor_i2c = adafruit_vl53l1x.VL53L1X(i2c)
-    vl53l1x.append(sensor_i2c)
-    # This ensures no address change on one sensor board, specifically the last one in the series.
-    if pin_number < len(xshut) - 1:
-        # The default address is 0x29. Update it to an address that is not already in use.
-        sensor_i2c.set_address(pin_number + 0x30)
+for i, pin in enumerate(xshut_pins):
+    # Power on the current sensor
+    GPIO.output(pin, GPIO.HIGH)
+    time.sleep(0.5)  # Allow sensor to initialize
 
-# Print the various sensor I2C addresses to the serial console.
-if i2c.try_lock():
-    print("Sensor I2C addresses:", [hex(x) for x in i2c.scan()])
-    i2c.unlock()
+    # Initialize sensor at default address 0x29
+    sensor = VL53L1X(i2c_bus=1, i2c_address=0x29)
+    sensor.open()
 
-# Start ranging for sensor data collection.
-for sensor in vl53l1x:
-    sensor.start_ranging()
-while True:
-    # Extract the appropriate data from the current list, and print
-    # the sensor distance readings for all available sensors.
-    for sensor_number, sensor in enumerate(vl53l1x):
-        if sensor.data_ready:
-            print("Sensor {}: {}".format(sensor_number + 1, sensor.distance))
-            sensor.clear_interrupt()
-    time.sleep(0.5)
+    if i != 0:
+        new_address = 0x29 + i
+        sensor.set_i2c_address(new_address)
+        # Reinitialize sensor object with new address
+        sensor = VL53L1X(i2c_bus=1, i2c_address=new_address)
+        sensor.open()
+
+    sensors.append(sensor)
+
+# Verify I2C addresses
+import smbus
+bus = smbus.SMBus(1)
+print("I2C addresses found:", [hex(addr) for addr in bus.scan()])
+
+# Start ranging
+for sensor in sensors:
+    sensor.start_ranging(1)  # 1 = Short range
+
+try:
+    while True:
+        for i, sensor in enumerate(sensors):
+            if sensor.data_ready:
+                print(f"Sensor {i+1}: {sensor.get_distance()} mm")
+                sensor.clear_interrupt()
+        time.sleep(0.1)
+except KeyboardInterrupt:
+    for sensor in sensors:
+        sensor.stop_ranging()
+    GPIO.cleanup()
