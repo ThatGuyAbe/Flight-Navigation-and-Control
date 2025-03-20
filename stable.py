@@ -1,3 +1,7 @@
+import threading
+import time
+import PID
+
 class StabilizationThread(threading.Thread):
     def __init__(self, imu, depth_sensor_manager, esc_control_callback,
                  command_handler, user_tracker):
@@ -125,8 +129,10 @@ class StabilizationThread(threading.Thread):
         combined['base_throttle'] += tracking.get('throttle', 0)
         
         return combined
-
-    def _arm(self):
+"""
+Start adding funtions to perfrom certain tasks like take off and landing
+"""
+def _arm(self):
         if not self.armed:
             self.armed = True
             self.base_throttle = self.hover_throttle
@@ -148,10 +154,64 @@ class StabilizationThread(threading.Thread):
         """Implement actual position checking logic"""
         return False
 
-    def _avoid_obstacles(self, distances):
-        """Existing indoor obstacle avoidance implementation"""
-        # [Previous implementation here]
-        return {}
+   def _avoid_obstacles(self, distances):
+        """Generate avoidance corrections for 5-directional sensing"""
+        correction = {'roll': 0, 'pitch': 0, 'yaw': 0}
+        safe_distance = 300  # mm
+        avoidance_strength = 75  # Base correction value
+        max_correction = 150  # Maximum allowed correction
+    
+        # Sensor Index Map (based on your initialization order)
+        # 0: bottom, 1: right, 2: left, 3: back, 4: top
+        
+        # Bottom Protection (Emergency Ascend)
+        if distances[0] < safe_distance:
+            correction['pitch'] += min(
+                avoidance_strength * (safe_distance - distances[0]) // 100,
+                max_correction
+            )
+        
+        # Top Protection (Emergency Descend)
+        if distances[4] < safe_distance * 1.2:  # More sensitive for overhead obstacles
+            correction['pitch'] -= min(
+                avoidance_strength * (safe_distance - distances[4]) // 100,
+                max_correction
+            )
+        
+        # Horizontal Plane Obstacle Avoidance
+        # Right Obstacle (Push left)
+        if distances[1] < safe_distance:
+            correction['roll'] -= min(
+                avoidance_strength * (safe_distance - distances[1]) // 50,
+                max_correction
+            )
+        
+        # Left Obstacle (Push right)
+        if distances[2] < safe_distance:
+            correction['roll'] += min(
+                avoidance_strength * (safe_distance - distances[2]) // 50,
+                max_correction
+            )
+        
+        # Rear Protection (Push forward)
+        if distances[3] < safe_distance * 1.5:  # Larger buffer for rear obstacles
+            correction['pitch'] += min(
+                avoidance_strength * (safe_distance - distances[3]) // 75,
+                max_correction
+            )
+    
+        # Yaw correction for directional preference
+        # Favor turning away from side obstacles
+        if distances[1] < distances[2]:  # More obstacles on right
+            correction['yaw'] = -avoidance_strength // 2
+        elif distances[2] < distances[1]:  # More obstacles on left
+            correction['yaw'] = avoidance_strength // 2
+    
+        # Limit maximum corrections
+        for axis in ['roll', 'pitch', 'yaw']:
+            correction[axis] = max(-max_correction, min(max_correction, correction[axis]))
+    
+        return correction
 
     def stop(self):
         self.running = False
