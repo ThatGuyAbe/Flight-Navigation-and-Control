@@ -56,19 +56,35 @@ class IMUThread(threading.Thread):
         self.bno = None
         self._init_sensor()
 
-    def _init_sensor(self):
+def _init_sensor(self):
         """Initialize IMU through multiplexer"""
-        self.multiplexer.select_channel(IMU_CHANNEL)
-        with i2c_lock:
-            self.bno = BNO08X_I2C(self.multiplexer.i2c, address=IMU_ADDRESS)
-            self.bno.enable_feature(BNO_REPORT_ROTATION_VECTOR)
-        time.sleep(0.5)
+        print("Initializing IMU...")
+        for attempt in range(5):  # Retry initialization
+            try:
+                # Select IMU channel first
+                self.multiplexer.select_channel(IMU_CHANNEL)
+                time.sleep(0.1)  # Important delay
+                
+                with i2c_lock:
+                    # BNO080 typically uses address 0x4A
+                    self.bno = BNO08X_I2C(self.multiplexer.i2c, address=0x4A)
+                    self.bno.enable_feature(BNO_REPORT_ROTATION_VECTOR)
+                    print("IMU initialized successfully")
+                    return
+            except Exception as e:
+                print(f"IMU init attempt {attempt+1} failed: {str(e)}")
+                time.sleep(0.5)
+        
+        raise RuntimeError("Failed to initialize IMU after 5 attempts")
 
     def run(self):
         """Continuous IMU reading"""
         while self.running:
             try:
+                # Must select channel before each read
                 self.multiplexer.select_channel(IMU_CHANNEL)
+                time.sleep(0.001)
+                
                 with i2c_lock:
                     quat = self.bno.quaternion
                 
