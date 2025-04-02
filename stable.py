@@ -132,7 +132,7 @@ class StabilizationThread(threading.Thread):
 """
 Start adding funtions to perfrom certain tasks like take off and landing
 """
-def _arm(self):
+    def _arm(self):
         if not self.armed:
             self.armed = True
             self.base_throttle = self.hover_throttle
